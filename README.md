@@ -41,15 +41,18 @@ import tensorflow as tf
 
 from swin.model import SwinT
 
-# Load the dataset
+# Load the dataset as a list of mini batches
 train_x = ...
 train_y =  ...
 num_classes = ...
 
-model = SwinT(input[0], num_classes)
+# Take a mini batch from the dataset to build the model
+mini_batch = train_x[0]
 
-# Build the model
-model(input[0])
+model = SwinT(mini_batch, num_classes)
+
+# Build the model by calling it for the first time
+model(mini_batch)
 
 # Compile the model
 model.compile(
@@ -100,10 +103,52 @@ While implementing the Swin Transformer architecture a number of assumptions and
 
 8. No absolute position information is included in embeddings[^3].
 
-9. ``LayerNormalization`` is applied after building patch embeddings[^1].
+9. ``LayerNormalization`` is applied after building patch embeddings[^2].
 
 [^1]: To stay consistent with the content of the paper.
 
 [^2]: In the original implementation this happens when using default arguments.
 
 [^3]: Researchers note in the paper that adding absolute position information to embedding decreases network capabilities.
+
+## Choosing parameters
+
+### Dependencies
+
+If using the base class (``Swin``), it is necessary to provide a series of parameters to instantiate the model.
+The choice of these values is important and a series of dependencies exist between them.
+
+The size of windows (``window_size``) used during (Shifted) Windows Multi-head Self Attention is the starting point and, as stated in the section about [assumptions](https://github.com/MidnessX/swin#assumptions-and-simplifications), it is fixed to ``7`` (as in the original paper).
+
+The resolution of inputs to network stages, expressed as the number of patches along each axis, must be a multiple of ``window_size`` and gets halved by every stage through ``SwinPatchMerging`` layers.
+The suggestion is to choose a resolution for the final stage and multiply it by ``2`` for every stage in the desired model, obtaining the input resolution of the first stage (``resolution_stage_1``).
+
+Input images to the ``Swin`` model must be squares, with their height/width given by multiplying ``resolution_stage_1`` with the desired size of patches (``patch_size``).
+
+The number of ``SwinTransformer`` layers in each stage (``depths``) is arbitrary.
+
+The number of transformer heads (``num_heads``) should instead double at each stage.
+Authors of the paper use a fixed ratio between embedding dimensions and the number of heads in each stage of the network, amounting to ``32``.
+This means that, chosen the number of transformer heads in the first stage, it should be multiplied by ``32`` to obtain ``embed_dim``.
+
+The following example should help clarify these concepts.
+
+### Parameter choice example
+
+Let's imagine we want a Swin Transformer having ``3`` stages.
+The last stage (``stage_3``) should receive inputs of ``14x14`` patches (``14 = window_size * 2``); this also means that ``stage_2`` receives inputs of ``28x28`` patches and ``stage_1`` of ``56x56``.
+
+We want to convert our images into patches having size ``6x6``, so images should have size ``56 * 6 = 336``.
+
+Our network will have ``2`` transformers in the first stage, ``4`` in the second and ``2`` in the third.
+We choose ``4`` heads for the first stage and thus the second one will have ``8`` heads while the third ``16``.
+
+With these numbers we can derive the size of embeddings used in the first stage by multiplying ``32`` by ``4``, giving us ``128``.
+
+Summarizing, we have:
+
+- ``image_size = 336``
+- ``patch_size = 6``
+- ``embed_dim = 128``
+- ``depths = [2, 4, 2]``
+- ``num_heads = [4, 8, 16]``
