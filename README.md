@@ -71,7 +71,14 @@ model.save("path/to/model/directory")
 
 - Swin architectures have many parameters, so training them is not an easy task. Expect a lot of trial & error before honing in correct hyperparameters.
 
-- ``SwinModule`` layers place the dimensionality reduction layer (``SwinPatchMergin``) after transformer layers (``SwinTransformer``), rather than before as found in the paper. This choice is to maintain consistency with the original network implementation.
+- ``SwinModule`` layers place the dimensionality reduction layer (``SwinPatchMerging``) after transformer layers (``SwinTransformer``), rather than before as found in the paper. This choice is to maintain consistency with the original network implementation.
+ 
+## Testing
+
+Test modules can be found under the ``tests`` folder of this repository.
+They can be executed to test the expected functionality of custom layers for the Swin architecture, as well as basic functionalities of the whole model.
+
+Admittedly these tests could be expanded and further improved to cover more cases, but they should be enough to verify general functionality.
 
 ## Assumptions and simplifications
 
