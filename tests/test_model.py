@@ -9,7 +9,7 @@ import unittest
 class TestSwin(unittest.TestCase):
     def setUp(self) -> None:
         self.ds_batches = 2
-        self.batch_size = 2 ** random.randint(0, 4)
+        self.batch_size = 2 ** random.randint(0, 2)
         self.img_channels = 3
 
         self.num_classes = random.randint(1, 10)
@@ -104,9 +104,9 @@ class TestSwin(unittest.TestCase):
 
         ds = self._build_dataset()
 
-        history = self.model.fit(ds, epochs=2)
+        history = self.model.fit(ds, epochs=1)
 
-        self.assertEqual(len(history.epoch), 2)
+        self.assertEqual(len(history.epoch), 1)
 
     def test_model_restore(self) -> None:
         output_1 = self.model(self.input)
