@@ -1,0 +1,21 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Test modules",
+            "type": "python",
+            "request": "launch",
+            "program": "tests/test_modules.py",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Test model",
+            "type": "python",
+            "request": "launch",
+            "program": "tests/test_model.py",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        }
+    ]
+}
