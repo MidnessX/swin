@@ -1,6 +1,7 @@
 """Modules used by the Swin Transformer."""
 
 import collections.abc
+
 import numpy as np
 import tensorflow as tf
 
@@ -18,7 +19,7 @@ class SwinLinear(tf.keras.layers.Dense):
         use_bias: Whether the layer uses a bias vector.
     """
 
-    def __init__(self, units: int, use_bias=True, **kwargs) -> None:
+    def __init__(self, units: int, use_bias: bool = True, **kwargs) -> None:
         super().__init__(
             units,
             activation=tf.keras.activations.linear,
@@ -38,7 +39,7 @@ class SwinPatchEmbeddings(tf.keras.layers.Layer):
 
     Args:
         embed_dim: Dimension of output embeddings.
-        patch_size: Size of axes of image patches, expressed in pixels.
+        patch_size: Height/width of patches, expressed in pixels.
         norm_layer: Whether to apply layer normalization or not.
     """
 
@@ -79,25 +80,21 @@ class SwinPatchEmbeddings(tf.keras.layers.Layer):
         )
         self.num_patches = self.patches_resolution[0] * self.patches_resolution[1]
 
-        self.flatten = tf.keras.layers.Reshape((-1, self.embed_dim))
-
     def call(self, inputs: tf.Tensor, **kwargs) -> tf.Tensor:
         """Build embeddings for every patch of the image.
 
         Args:
-            inputs: A batch of images with shape (batch_size, height, width,
-                channels).
+            inputs: A batch of images with shape ``(batch_size, height, width, channels)``.
+                ``height`` and ``width`` must be identical.
 
         Returns:
-            Embeddings, having shape ``(batch_size, num_patches, embed_dim)``.
+            Embeddings, having shape ``(batch_size, height / patch_size,
+            width / patch_size, embed_dim)``.
         """
 
-        x = tf.ensure_shape(inputs, [None, None, None, 3])
+        x = self.proj(inputs, **kwargs)
 
-        x = self.proj(x, **kwargs)
-        x = self.flatten(x, **kwargs)
-
-        if self.norm:
+        if self.norm is not None:
             x = self.norm(x, **kwargs)
 
         return x
@@ -125,90 +122,76 @@ class SwinPatchMerging(tf.keras.layers.Layer):
             patches.
     """
 
-    def __init__(self, input_resolution: int, **kwargs) -> None:
-        # NOTE: Changed input_resolution from tuple to int
-
+    def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
-
-        assert input_resolution % 2 == 0
-        self.input_resolution = input_resolution
 
         self.norm = tf.keras.layers.LayerNormalization(epsilon=1e-5)
 
     def build(self, input_shape: tf.TensorShape):
-        self.reduction = SwinLinear(input_shape[-1] * 2, use_bias=False)
+        assert input_shape.rank == 4
+        assert input_shape[1] == input_shape[2]
+        assert input_shape[1] % 2 == 0
+
+        self.reduction = SwinLinear(input_shape[3] * 2, use_bias=False)
 
     def call(self, inputs: tf.Tensor, **kwargs) -> tf.Tensor:
-        """Perform the merging of patches.
+        """Merge groups of 4 neighbouring of patches.
 
-        The merge is performed on groups of 4 neighbouring patches.
+        This layer concatenates the features of groups of 4 neighbouring patches
+        and project the concatenation into a space twice the length of the
+        original feature space.
 
         Args:
-            inputs: Tensor of patches, with shape ``(batch_size,
-                num_patches, embed_dim)`` with
-                ``num_patches = input_resolution * input_resolution``.
+            inputs: Tensor of patches, with shape
+                ``(batch_size, height_patches, width_patches, embed_dim)`` with
+                ``height_patches`` must be equal to ``width_patches``.
 
         Returns:
-            Embeddings of merged patches, with shape ``(batch_size, num_patches / 4, 2 * embed_dim)``.
+            Embeddings of merged patches, with shape ``(batch_size,
+            heigth_patches /2, width_patches / 2, 2 * embed_dim)``.
         """
 
-        tf.assert_equal(inputs.dtype, tf.float32, "Inputs must be a tf.float32 tensor.")
-        x = tf.ensure_shape(inputs, [None, self.input_resolution**2, None])
-
-        shape = tf.shape(inputs)
-        batch = shape[0]
-        channels = shape[2]
-
-        x = tf.reshape(
-            x, [batch, self.input_resolution, self.input_resolution, channels]
-        )
-
-        x0 = x[:, 0::2, 0::2, :]
-        x1 = x[:, 1::2, 0::2, :]
-        x2 = x[:, 0::2, 1::2, :]
-        x3 = x[:, 1::2, 1::2, :]
-
-        x = tf.concat([x0, x1, x2, x3], axis=-1)
-        x = tf.reshape(x, [batch, -1, 4 * channels])
+        x = tf.concat(
+            [
+                inputs[:, 0::2, 0::2, :],
+                inputs[:, 1::2, 0::2, :],
+                inputs[:, 0::2, 1::2, :],
+                inputs[:, 1::2, 1::2, :],
+            ],
+            axis=-1,
+        )  # [batch_size, height_patches / 2, width_patches / 2, 4 * embed_dim]
 
         x = self.norm(x, **kwargs)
-        x = self.reduction(x, **kwargs)
+        x = self.reduction(
+            x, **kwargs
+        )  # [batch_size, height_patches / 2, width_patches / 2, 2 * embed_dim]
 
         return x
 
-    def get_config(self) -> dict:
-        config = super().get_config()
-        config.update({"input_resolution": self.input_resolution})
-        return config
-
     def __repr__(self) -> str:
-        return f"{self.__class__.__name__}(input_resolution={self.input_resolution})"
+        return f"{self.__class__.__name__}()"
 
 
 class SwinStage(tf.keras.layers.Layer):
     """Stage of the Swin Network.
 
     Args:
-        input_resolution: The resolution of axes of the input, expressed in
-            number of patches.
-        depth: Number of SwinTransformer layers in the stage.
-        num_heads: Number of attention heads in each SwinTransformer layer.
-        window_size: The size of windows in which embeddings gets split into,
-            expressed in numer of patches.
+        depth: Number of ``SwinTransformer`` layers in the stage.
+        num_heads: Number of attention heads in each ``SwinTransformer`` layer.
+        window_size: The size of window axes expressed in patches.
         mlp_ratio: The ratio between the size of the hidden layer and the size
-            of the output layer in SwinMlp layers.
-        drop_p: The probability of dropping connections in a SwinTransformer
+            of the output layer in ``SwinMlp`` layers.
+        drop_p: The probability of dropping connections in a ``SwinTransformer``
             layer during training.
         drop_path_p: The proabability of entirely skipping the computation of
             (Shifted) Windows Multi-head Self Attention during training
             (Stochastic Depth technique).
-        downsample: Whether or not to apply downsampling at the end of the
-            layer.
+        downsample: Whether or not to apply downsampling through a
+            ``SwinPatchMerging`` layer at the end of the stage.
     """
 
     def __init__(
         self,
-        input_resolution: int,
         depth: int,
         num_heads: int,
         window_size: int,
@@ -220,19 +203,17 @@ class SwinStage(tf.keras.layers.Layer):
     ) -> None:
         super().__init__(**kwargs)
 
-        self.input_resolution = input_resolution
         self.depth = depth
         self.num_heads = num_heads
         self.window_size = window_size
         self.mlp_ratio = mlp_ratio
         self.drop_p = drop_p
         self.drop_path_p = drop_path_p
-        self.donwsample = downsample
+        self.downsample = downsample
 
         self.core = tf.keras.Sequential(
             [
                 SwinTransformer(
-                    resolution=self.input_resolution,
                     num_heads=num_heads,
                     window_size=window_size,
                     shift_size=0 if (i % 2 == 0) else window_size // 2,
@@ -246,29 +227,32 @@ class SwinStage(tf.keras.layers.Layer):
             ]
         )
 
-        if downsample:
-            self.downsample_layer = SwinPatchMerging(self.input_resolution)
-        else:
-            self.downsample_layer = None
+        self.downsample_layer = SwinPatchMerging() if downsample else None
+
+    def build(self, input_shape: tf.TensorShape):
+        assert (
+            input_shape.rank == 4
+        )  # Must be batch_size, height_patches, width_patches, embed_dim
+        assert input_shape[1] == input_shape[2]
 
     def call(self, inputs: tf.Tensor, **kwargs) -> tf.Tensor:
         """Apply transformations of the Swin stage to patches.
 
         Args:
-            inputs: The input patches to the Swin stage, having shape ``
-                (batch_size, num_patches, embed_dim)``.
+            inputs: The input patches to the Swin stage, having shape
+                ``(batch_size, height_patches, width_patches, embed_dim)``.
+                ``height_patches`` must be equal to ``width_patches``.
 
         Returns:
-            Transformed patches with shape ``(batch_size, num_patches / 4,
-            embed_dim * 2)`` if ``downsample == True`` or ``(batch_size,
-            num_patches, embed_dim)`` if ``downsample == False``.
+            Transformed patches with shape ``(batch_size, height_patches / 2,
+            width_patches / 2, embed_dim * 2)`` if ``downsample == True``
+            or ``(batch_size, height_patches, width_patches, embed_dim)``
+            if ``downsample == False``.
         """
 
-        x = tf.ensure_shape(inputs, [None, None, None])
+        x = self.core(inputs, **kwargs)
 
-        x = self.core(x, **kwargs)
-
-        if self.donwsample:
+        if self.downsample:
             x = self.downsample_layer(x, **kwargs)
 
         return x
@@ -277,28 +261,25 @@ class SwinStage(tf.keras.layers.Layer):
         config = super().get_config()
         config.update(
             {
-                "input_resolution": self.input_resolution,
                 "depth": self.depth,
                 "num_heads": self.num_heads,
                 "window_size": self.window_size,
                 "mlp_ratio": self.mlp_ratio,
                 "drop_p": self.drop_p,
                 "drop_path_p": self.drop_path_p,
-                "downsample": self.donwsample,
+                "downsample": self.downsample,
             }
         )
         return config
 
     def __repr__(self) -> str:
-        return f"{self.__class__.__name__}(input_resolution={self.input_resolution}, depth={self.depth}, num_heads={self.num_heads}, window_size={self.window_size}, mlp_ratio={self.mlp_ratio}, drop_p={self.drop_p}, drop_path_p={self.drop_path_p}, downsample={self.donwsample})"
+        return f"{self.__class__.__name__}(depth={self.depth}, num_heads={self.num_heads}, window_size={self.window_size}, mlp_ratio={self.mlp_ratio}, drop_p={self.drop_p}, drop_path_p={self.drop_path_p}, downsample={self.downsample})"
 
 
 class SwinWindowAttention(tf.keras.layers.Layer):
     """Swin (Shifted) Window Multi-head Self Attention Layer.
 
     Args:
-        window_size: The size of windows in which embeddings gets divided into,
-            expressed in patches.
         num_heads: The number of attention heads.
         proj_drop_r: The ratio of output weights that randomly get dropped
             during training.
@@ -306,42 +287,71 @@ class SwinWindowAttention(tf.keras.layers.Layer):
 
     def __init__(
         self,
-        window_size: int,
         num_heads: int,
         proj_drop_r: float = 0.0,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
 
-        self.window_size = window_size
         self.num_heads = num_heads
         self.proj_drop_r = proj_drop_r
-
-        # TODO: Change into TF calls to get rid of numpy
-        coords_h = range(self.window_size)
-        coords_w = range(self.window_size)
-        coords = np.stack(np.meshgrid(coords_h, coords_w, indexing="ij"))
-        coords_flat = np.reshape(coords, [coords.shape[0], -1])
-        relative_coords = coords_flat[:, :, None] - coords_flat[:, None, :]
-        relative_coords = np.transpose(relative_coords, [1, 2, 0])
-        relative_coords[:, :, 0] += self.window_size - 1
-        relative_coords[:, :, 1] += self.window_size - 1
-        relative_coords[:, :, 0] *= 2 * self.window_size - 1
-        relative_position_index = relative_coords.sum(-1)
-
-        self.relative_position_index = tf.Variable(
-            initial_value=tf.convert_to_tensor(relative_position_index),
-            trainable=False,
-            name="relative_position_index",
-        )
 
         self.proj_drop = tf.keras.layers.Dropout(self.proj_drop_r)
         self.softmax = tf.keras.layers.Softmax(-1)
 
-    def build(self, input_shape: tf.TensorShape) -> None:
-        channels = input_shape[-1]
+    @classmethod
+    def build_relative_position_index(cls, window_size: int) -> tf.Tensor:
+        """Build the table of relative position indices.
 
-        self.head_dim = channels // self.num_heads
+        This table is used as an index to the relative position table. For each
+        pair of tokens in a window, this table allows to get the index in the
+        relative position table.
+
+        Args:
+            window_size: The size of windows (expressed in patches) used during
+                the (S)W-MSA.
+
+        Returns:
+            A ``Tensor`` with shape ``(window_size**2, window_size**2)``
+            representing indices in the relative position table for each pair of
+            patches in the window.
+        """
+
+        coords = tf.range(0, window_size)
+        coords = tf.stack(tf.meshgrid(coords, coords, indexing="ij"))
+        coords = tf.reshape(coords, [tf.shape(coords)[0], -1])
+
+        rel_coords = tf.expand_dims(coords, 2) - tf.expand_dims(
+            coords, 1
+        )  # Make values relative
+        rel_coords = tf.transpose(rel_coords, [1, 2, 0])
+
+        rel_coords = tf.Variable(rel_coords)
+
+        rel_coords[:, :, 0].assign(
+            rel_coords[:, :, 0] + window_size - 1
+        )  # Add offset to values
+        rel_coords[:, :, 1].assign(rel_coords[:, :, 1] + window_size - 1)
+
+        rel_coords[:, :, 0].assign(
+            rel_coords[:, :, 0] * (2 * window_size - 1)
+        )  # Shift values so indices for different patches do not share the same value
+
+        rel_pos_index = tf.reduce_sum(rel_coords, -1)
+
+        return rel_pos_index
+
+    def build(self, input_shape: tf.TensorShape) -> None:
+        assert input_shape.rank == 5
+        assert input_shape[2] == input_shape[3]
+        assert (
+            input_shape[4] % self.num_heads == 0
+        )  # embeddings dimension must be evenly divisible by the number of attention heads
+
+        self.window_size = input_shape[2]
+        embed_dim = input_shape[4]
+
+        self.head_dim = embed_dim // self.num_heads
         self.scale = self.head_dim**-0.5  # In the paper, sqrt(d)
 
         # The official implementation uses a custom function which defaults
@@ -359,8 +369,17 @@ class SwinWindowAttention(tf.keras.layers.Layer):
             trainable=True,
         )
 
-        self.qkv = SwinLinear(channels * 3)
-        self.proj = SwinLinear(channels)
+        self.relative_position_index = tf.Variable(
+            initial_value=tf.reshape(
+                SwinWindowAttention.build_relative_position_index(self.window_size),
+                [-1],
+            ),  # Flatten the matrix so it can be used to index the relative_position_bias_table in the forward pass
+            trainable=False,
+            name="relative_position_index",
+        )
+
+        self.qkv = SwinLinear(embed_dim * 3)
+        self.proj = SwinLinear(embed_dim)
 
     def call(
         self, inputs: tf.Tensor, mask: tf.Tensor | None = None, **kwargs
@@ -368,8 +387,8 @@ class SwinWindowAttention(tf.keras.layers.Layer):
         """Perform (Shifted) Window MSA.
 
         Args:
-            inputs: Embeddings with shape ``(num_windows * batch_size,
-                window_size * window_size, embed_dim)``. ``embed_dim`` must be
+            inputs: Embeddings with shape ``(batch_size, num_windows,
+                window_size, window_size, embed_dim)``. ``embed_dim`` must be
                 exactly divisible by ``num_heads``.
             mask: Attention mask used used to perform Shifted Window MSA, having
                 shape ``(num_windows, window_size * window_size, window_size * window_size)`` and values {0, -inf}.
@@ -379,25 +398,21 @@ class SwinWindowAttention(tf.keras.layers.Layer):
             input.
         """
 
-        x = tf.ensure_shape(inputs, [None, self.window_size**2, None])
-
         shape = tf.shape(inputs)
-        batch_windows = shape[0]
-        window_dim = shape[1]
-        embed_dim = shape[2]
+        batch_windows = shape[0] * shape[1]
+        window_dim = shape[2] * shape[3]
+        embed_dim = shape[4]
 
-        tf.assert_equal(
-            embed_dim % self.num_heads,
-            0,
-            "Provided input dimension 3 (embed_dim) is not evenly divisible by the number of attention heads.",
-        )
+        x = tf.reshape(inputs, [batch_windows, window_dim, embed_dim])
 
-        qkv = self.qkv(x, **kwargs)
+        qkv = self.qkv(x, **kwargs)  # [batch_windows, window_dim, 3 * embed_dim]
         qkv = tf.reshape(
             qkv,
-            [batch_windows, window_dim, 3, self.num_heads, embed_dim // self.num_heads],
+            [batch_windows, window_dim, 3, self.num_heads, self.head_dim],
         )
-        qkv = tf.transpose(qkv, [2, 0, 3, 1, 4])
+        qkv = tf.transpose(
+            qkv, [2, 0, 3, 1, 4]
+        )  # [3, batch_windows, num_heads, window_dim, head_dim]
 
         q = qkv[0]
         k = qkv[1]
@@ -405,40 +420,58 @@ class SwinWindowAttention(tf.keras.layers.Layer):
 
         q = q * self.scale
 
-        attn = tf.matmul(q, tf.transpose(k, [0, 1, 3, 2]))
+        attn = tf.matmul(
+            q, k, transpose_b=True
+        )  # [batch_windows, num_heads, window_dim, window_dim]
 
-        indices = tf.reshape(self.relative_position_index, [-1])
-        relative_position_bias = tf.gather(self.relative_position_bias_table, indices)
+        relative_position_bias = tf.gather(
+            self.relative_position_bias_table, self.relative_position_index
+        )  # [window_dim**2, num_heads]
         relative_position_bias = tf.reshape(
             relative_position_bias, [window_dim, window_dim, -1]
         )
-        relative_position_bias = tf.transpose(relative_position_bias, [2, 0, 1])
+        relative_position_bias = tf.transpose(
+            relative_position_bias, [2, 0, 1]
+        )  # [num_heads, window_dim, window_dim]
 
-        attn = attn + tf.expand_dims(relative_position_bias, axis=0)
+        attn = attn + tf.expand_dims(
+            relative_position_bias, axis=0
+        )  # [batch_windows, num_heads, window_dim, window_dim]
 
         if mask is not None:
-            nW = tf.shape(mask)[0]
+            num_windows = tf.shape(mask)[0]
             attn = tf.reshape(
-                attn, [batch_windows // nW, nW, self.num_heads, window_dim, window_dim]
-            )
+                attn,
+                [
+                    batch_windows // num_windows,
+                    num_windows,
+                    self.num_heads,
+                    window_dim,
+                    window_dim,
+                ],
+            )  # Expand to [batch_size, num_windows, num_heads, window_dim, windo_dim] in order to sum the attention mask
             attn = attn + tf.expand_dims(tf.expand_dims(mask, axis=1), axis=0)
-            attn = tf.reshape(attn, [-1, self.num_heads, window_dim, window_dim])
+            attn = tf.reshape(
+                attn, [-1, self.num_heads, window_dim, window_dim]
+            )  # Back to [batch_windows, num_heads, window_dim, window_dim]
 
         attn = self.softmax(attn, **kwargs)
 
-        x = tf.matmul(attn, v)
-        x = tf.transpose(x, [0, 2, 1, 3])
-        x = tf.reshape(x, [batch_windows, window_dim, embed_dim])
-        x = self.proj(x, **kwargs)
-        x = self.proj_drop(x, **kwargs)
+        attn = tf.matmul(attn, v)
+        attn = tf.transpose(attn, [0, 2, 1, 3])
+        attn = tf.reshape(attn, [batch_windows, window_dim, embed_dim])
 
-        return x
+        attn = self.proj(attn, **kwargs)
+        attn = self.proj_drop(attn, **kwargs)
+
+        attn = tf.reshape(attn, tf.shape(inputs))
+
+        return attn
 
     def get_config(self) -> dict:
         config = super().get_config()
         config.update(
             {
-                "window_size": self.window_size,
                 "num_heads": self.num_heads,
                 "proj_drop_r": self.proj_drop_r,
             }
@@ -446,22 +479,39 @@ class SwinWindowAttention(tf.keras.layers.Layer):
         return config
 
     def __repr__(self) -> str:
-        return f"{self.__class__.__name__}(window_size={self.window_size}, num_heads={self.num_heads}, proj_drop_r={self.proj_drop_r})"
+        return f"{self.__class__.__name__}(num_heads={self.num_heads}, proj_drop_r={self.proj_drop_r})"
 
 
 class SwinDropPath(tf.keras.layers.Layer):
-    """Stochastic Depth Layer.
+    """Stochastic per-sample layer drop.
+
+    This is an implementation of the stochastic depth technique described in the
+    "Deep Networks with Stochastic Depth" paper by Huang et al.
+    (https://arxiv.org/pdf/1603.09382.pdf).
+
+    Examples in a batch have a probability to have their values set to 0.
+    This is useful in conjunction with residual paths, as adding the residual
+    connection with 0 yields the original example, as if other computations
+    never took place in the main path.
 
     Args:
-        drop_prob: The probability of entirely skipping the output of the
-            computation.
+        drop_prob: The probability of entirely skipping the layer.
     """
 
     def __init__(self, drop_prob: float = 0.0, **kwargs) -> None:
         super().__init__(**kwargs)
 
+        assert drop_prob >= 0 and drop_prob <= 1
+
         self.drop_prob = drop_prob
         self.keep_prob = 1 - self.drop_prob
+
+    def build(self, input_shape: tf.TensorShape) -> None:
+        # We want to get a rank-1 tensor, with tf.rank(inputs) values all set to
+        # 1 except for the first one, identical to the batch size.
+        # e.g. [4, 1, 1, 1].
+        self.shape = tf.ones([input_shape.rank], dtype=tf.int32)
+        self.shape = tf.tensor_scatter_nd_update(self.shape, [[0]], [input_shape[0]])
 
     def call(
         self, inputs: tf.Tensor, training: tf.Tensor = None, **kwargs
@@ -472,8 +522,8 @@ class SwinDropPath(tf.keras.layers.Layer):
             inputs: The input data. The first dimension is assumed to be the
                 ``batch_size``.
             training: Whether the forward pass is happening at training time
-                or not. During inference (``training`` = False) ``inputs`` is
-                returned as-is.
+                or not. During inference (``training = False``) ``inputs`` is
+                returned as-is (i.e. no drops).
 
         Returns:
             The input tensor with some values randomly set to 0.
@@ -482,21 +532,9 @@ class SwinDropPath(tf.keras.layers.Layer):
         if self.drop_prob == 0 or not training:
             return inputs
 
-        first_axis = tf.expand_dims(tf.shape(inputs)[0], axis=0)
-        other_axis = tf.repeat(
-            1, tf.rank(inputs) - 1
-        )  # Rank-1 tensor with (rank(inputs) - 1) axes, all having value 1
-
-        # We want to get a rank-1 tensor with 1 as the value of all axes except
-        # for the first one, identical to the batch size
-        shape = tf.concat(
-            [first_axis, other_axis],
-            axis=0,
-        )
-
         rand_tensor = tf.constant(self.keep_prob, dtype=inputs.dtype)
         rand_tensor = rand_tensor + tf.random.uniform(
-            shape, maxval=1.0, dtype=inputs.dtype
+            self.shape, maxval=1.0, dtype=inputs.dtype
         )
         rand_tensor = tf.floor(rand_tensor)
 
@@ -535,20 +573,22 @@ class SwinMlp(tf.keras.layers.Layer):
         self.fc2 = SwinLinear(self.out_features)
         self.drop = tf.keras.layers.Dropout(self.drop_p)
 
+    def build(self, input_shape: tf.TensorShape) -> None:
+        assert input_shape.rank == 4
+
     def call(self, inputs: tf.Tensor, **kwargs) -> tf.Tensor:
         """Apply the transformations of the MLP.
 
         Args:
-            inputs: The input data, having shape ``(batch_size, num_patches,
-                embed_size)``.
+            inputs: The input data, having shape
+            ``(batch_size, height_patches, width_patches, embed_size)``.
 
         Returns:
-            The transformed inputs, with shape ``(batch_size, num_patches,
-            out_features)``.
+            The transformed inputs, with shape
+            ``(batch_size, num_patches, out_features)``.
         """
-        x = tf.ensure_shape(inputs, [None, None, None])
 
-        x = self.fc1(x, **kwargs)
+        x = self.fc1(inputs, **kwargs)
         x = tf.nn.gelu(x)
         x = self.drop(x, **kwargs)
         x = self.fc2(x, **kwargs)
@@ -562,6 +602,7 @@ class SwinMlp(tf.keras.layers.Layer):
             {
                 "hidden_features": self.hidden_features,
                 "out_features": self.out_features,
+                "drop_p": self.drop_p,
             }
         )
         return config
@@ -574,25 +615,20 @@ class SwinTransformer(tf.keras.layers.Layer):
     """Swin Transformer Layer.
 
     Args:
-        resolution: The input resolution expressed in number of patches per
-            axis. Both axis share the same resolution as the orginal image
-            must be a square.
-        num_heads: The number of Shifted Window Attention heads.
-        window_size: The size of windows in which the image gets partitioned
-            into, expressed in patches.
+        num_heads: The number of (Shifted) Window Attention heads.
+        window_size: The size of window axes, expressed in patches.
         shift_size: The value of shifting applied to windows, expressed in
             patches.
         mlp_ratio: The ratio between the size of the hidden layer and the
-            size of the output layer in SwinMlp.
-        drop_p: The probability of dropping connections in Dropout layers during
-            training.
+            size of the output layer in ``SwinMlp``.
+        drop_p: The probability of dropping connections in ``Dropout`` layers
+            during training.
         drop_path_p: The probability of entirely skipping a (Shifted) Windows
             Multi-head Self Attention computation during training.
     """
 
     def __init__(
         self,
-        resolution: int,
         num_heads: int,
         window_size: int,
         shift_size: int,
@@ -603,7 +639,6 @@ class SwinTransformer(tf.keras.layers.Layer):
     ) -> None:
         super().__init__(**kwargs)
 
-        self.resolution = resolution
         self.num_heads = num_heads
         self.window_size = window_size
         self.shift_size = shift_size
@@ -611,82 +646,34 @@ class SwinTransformer(tf.keras.layers.Layer):
         self.drop_p = drop_p
         self.drop_path_p = drop_path_p
 
-        if self.resolution <= self.window_size:
-            self.shift_size = 0
-            self.window_size = self.resolution
-
-        # Resolution must be evenly divisible by the window size or reshape
-        # operations will not work
-        assert self.resolution % self.window_size == 0
-
-        assert 0 <= self.shift_size < self.window_size
-
         self.norm_1 = tf.keras.layers.LayerNormalization(epsilon=1e-5)
-        self.attention = SwinWindowAttention(
-            self.window_size, self.num_heads, proj_drop_r=drop_p
-        )
+        self.attention = SwinWindowAttention(self.num_heads, proj_drop_r=drop_p)
         # When drop_path_p == 0 SwinDropPath simply returns the same value
         self.drop_path = SwinDropPath(self.drop_path_p)
 
         self.norm_2 = tf.keras.layers.LayerNormalization(epsilon=1e-5)
 
-        if self.shift_size > 0:
-            attn_mask = self.build_attn_mask(
-                self.resolution,
-                self.window_size,
-                self.shift_size,
-            )
-
-            self.attn_mask = tf.Variable(
-                initial_value=attn_mask,
-                trainable=False,
-                name="attention_mask",
-            )
-        else:
-            self.attn_mask = None
-
     @classmethod
-    @tf.function(
-        input_signature=[
-            tf.TensorSpec(shape=[None, None, None, None], dtype=tf.float32),
-            tf.TensorSpec(shape=[], dtype=tf.int32),
-        ],
-    )
     def window_partition(cls, patches: tf.Tensor, window_size: tf.Tensor) -> tf.Tensor:
         """Partition a batch of images into windows.
 
-        .. Note::
-
-            This method may throw warnings due to an excessive number of
-            retracing operations.
-            However, due to it being used in the forward pass of the full
-            model, keeping it decorated as a ``tf.function`` should still prove
-            to be beneficial.
-
         Args:
-            patches: Patch embeddings for a batch of images to partition
-                into windows, having shape ``(batch_size, num_patches_h,
-                num_patches_w, embed_dim)``. ``num_patches_h == num_patches_w``.
-            window_size: The size of each window, expressed in patches.
+            patches: A batch of patch embeddings to partition into windows,
+                having shape ``(batch_size, num_patches_h, num_patches_w,
+                embed_dim)``.
+            window_size: The size of each window, expressed in patches along
+                each axis.
 
         Returns:
-            A tensor of windows having shape ``(n * batch_size, window_size,
+            A tensor of windows having shape ``(batch_size, n, window_size,
             window_size, embed_dim)``, where ``n`` is the number of
             resulting windows.
         """
 
-        x = tf.ensure_shape(patches, [None, None, None, None])
-        window_size = tf.ensure_shape(window_size, [])
-
-        shape = tf.shape(x)
-        tf.assert_equal(
-            shape[1],
-            shape[2],
-            "The number of patches in the height dimension must be equal to the number of patches in the width dimension (patches must be squared).",
-        )
+        shape = tf.shape(patches)
 
         windows = tf.reshape(
-            x,
+            patches,
             [
                 shape[0],
                 shape[1] // window_size,
@@ -697,103 +684,51 @@ class SwinTransformer(tf.keras.layers.Layer):
             ],
         )
         windows = tf.transpose(windows, [0, 1, 3, 2, 4, 5])
-        windows = tf.reshape(windows, [-1, window_size, window_size, shape[3]])
+        windows = tf.reshape(
+            windows, [shape[0], -1, window_size, window_size, shape[3]]
+        )
 
         return windows
 
     @classmethod
-    @tf.function
-    def window_reverse(cls, windows: tf.Tensor, patch_size: tf.Tensor) -> tf.Tensor:
+    def window_reverse(cls, windows: tf.Tensor, resolution: tf.Tensor) -> tf.Tensor:
         """Reverse the partitioning of a batch of patches into windows.
 
+        .. Note:
+            ``resolution`` is expected to be a multiple of the size of windows.
+            No checks are performed to ensure this holds.
+
         Args:
-            windows: Partitioned windows to reverse, with shape ``(batch_size *
-                num_windows, window_size, window_size, embed_dim)``.
-            patch_size: Number of patches per axis in the original image.
+            windows: Partitioned windows to reverse, with shape
+            ``(batch_size, num_windows, window_size, window_size, embed_dim)``.
+            resolution: Number of patches per axis in the original feature map.
 
         Returns:
             A tensor of patches of the batch recreated from ``windows``, with
-            shape ``(batch_size, patch_size, patch_size, embed_dim)``.
+            shape ``(batch_size, resolution, resolution, embed_dim)``.
         """
 
-        x = tf.ensure_shape(windows, [None, None, None, None])
+        shape = tf.shape(windows)
 
-        tf.assert_equal(
-            tf.shape(x)[1],
-            tf.shape(x)[2],
-            "Dimension 1 and dimension 2 of 'windows' must be identical.",
-        )
-        window_size = tf.shape(x)[1]
-
-        # TODO: simplify
-        b = tf.cast(tf.shape(x)[0], tf.float64)  # Casting to prevent type mismatch
-        d = patch_size**2 / window_size / tf.cast(window_size, tf.float64)
-        batch_size = tf.cast(b / d, tf.int32)
+        batch_size = shape[0]
+        window_size = shape[2]
+        embed_dim = shape[4]
 
         x = tf.reshape(
-            x,
+            windows,
             [
                 batch_size,
-                patch_size // window_size,
-                patch_size // window_size,
+                resolution // window_size,
+                resolution // window_size,
                 window_size,
                 window_size,
-                -1,
+                embed_dim,
             ],
         )
         x = tf.transpose(x, [0, 1, 3, 2, 4, 5])
-        x = tf.reshape(x, [batch_size, patch_size, patch_size, -1])
+        x = tf.reshape(x, [batch_size, resolution, resolution, embed_dim])
 
         return x
-
-    @classmethod
-    def masked_fill(
-        cls, tensor: tf.Tensor, mask: tf.Tensor, value: tf.Tensor
-    ) -> tf.Tensor:
-        """Fill elements of ``tensor`` with ``value`` where ``mask`` is True.
-
-        This function returns a new tensor having the same values as ``tensor``
-        except for those where ``mask`` contained the value True; these values are
-        replaced with ``value``.
-
-        It mimics ``torch.tensor.masked_fill()``.
-
-        ``mask`` must have identical shape to ``tensor`` and ``value`` must be a
-        scalar tensor.
-        ``value`` is cast to the type of ``tensor`` if their types don't match.
-
-        Args:
-            tensor: The tensor to fill with ``value`` where ``mask`` is True.
-            mask: The mask to apply to ``tensor``.
-            value: The value to fill ``tensor`` with.
-
-        Returns:
-            A copy of ``tensor`` with elements changed to ``value`` where
-            ``mask`` was ``True``.
-        """
-
-        tf.assert_equal(
-            tf.shape(tensor),
-            tf.shape(mask),
-            "The shape of tensor must match the shape of mask.",
-        )
-        tf.assert_equal(tf.rank(value), 0, "'value' must be a scalar tensor.")
-
-        if value.dtype != tensor.dtype:
-            value = tf.cast(value, tensor.dtype)
-
-        indices = tf.where(mask)
-
-        filled_tensor = tf.tensor_scatter_nd_update(
-            tensor,
-            indices,
-            tf.broadcast_to(
-                value,
-                [tf.shape(indices)[0]],
-            ),
-        )
-
-        return filled_tensor
 
     @classmethod
     def build_attn_mask(cls, size: int, window_size: int, shift_size: int):
@@ -808,7 +743,10 @@ class SwinTransformer(tf.keras.layers.Layer):
             The computed attention mask, with shape ``(num_windows, window_size * window_size, window_size * window_size)``.
         """
 
-        # TODO: Change mask creation to ditch numpy
+        # While possible to build the mask only through TensorFlow operations,
+        # it would result in a much less readable method.Since Numpy is already
+        # a TensorFlow dependency and this method is only called during this
+        # layer's initialization, using it to build the mask is fine.
         mask = np.zeros(
             [1, size, size, 1], dtype=np.float32
         )  # Force type so we get a tf.float32 tensor as the output of this method.
@@ -831,19 +769,62 @@ class SwinTransformer(tf.keras.layers.Layer):
 
         mask_windows = SwinTransformer.window_partition(
             tf.convert_to_tensor(mask), tf.constant(window_size)
-        )
-        mask_windows = tf.reshape(mask_windows, [-1, window_size * window_size])
+        )  # mask_windows.shape = [n, window_size, window_size, 1].
+        mask_windows = tf.reshape(
+            mask_windows, [-1, window_size * window_size]
+        )  # mask_windows.shape = [n, window_size**2], we flatten windows.
+
+        # We need to create a mask which, for each patch in each window, tells
+        # us if the attention mechanism should be calculated for every other
+        # patch in the same window.
+        # This means a mask with shape [n, window_size**2, window_size**2].
+        # Subtracting the two expanded mask_windows gives us a tensor with the
+        # right shape and values equal to zero where two patches are adjacent in
+        # the original feature map (meaning attention should be calculated).
         attn_mask = tf.expand_dims(mask_windows, 1) - tf.expand_dims(mask_windows, 2)
-        attn_mask = SwinTransformer.masked_fill(
-            attn_mask, attn_mask != 0, tf.constant(-100.0)
-        )  # TODO: check if -100 can be changed to -math.inf
-        attn_mask = SwinTransformer.masked_fill(
-            attn_mask, attn_mask == 0, tf.constant(0.0)
-        )
+
+        # We now need to change values != 0 to something negative. When put
+        # through the SoftMax operation performed during the SW-MSA, it results
+        # in a value close to 0 for those patches that were not adjacent in the
+        # original feature map.
+        # Technically, the bigger the negative number the better
+        # (i.e. -math.inf), but it could lead to float values shenanigans so we
+        # choose -100 to stay consistent with the original implementation.
+        attn_mask = tf.where(attn_mask != 0, tf.constant(-100.0), attn_mask)
 
         return attn_mask
 
     def build(self, input_shape: tf.TensorShape) -> None:
+        assert input_shape.rank == 4
+        assert input_shape[1] == input_shape[2]
+
+        self.resolution = input_shape[1]
+
+        # Resolution must be evenly divisible by the window size or reshape
+        # operations will not work
+        assert self.resolution % self.window_size == 0
+
+        if self.resolution <= self.window_size:
+            self.shift_size = 0
+            self.window_size = self.resolution
+
+        assert 0 <= self.shift_size < self.window_size
+
+        if self.shift_size > 0:
+            attn_mask = self.build_attn_mask(
+                self.resolution,
+                self.window_size,
+                self.shift_size,
+            )
+
+            self.attn_mask = tf.Variable(
+                initial_value=attn_mask,
+                trainable=False,
+                name="attention_mask",
+            )
+        else:
+            self.attn_mask = None
+
         dim = input_shape[-1]
         mlp_hidden_dim = int(dim * self.mlp_ratio)
         self.mlp = SwinMlp(mlp_hidden_dim, out_features=dim, drop_p=self.drop_p)
@@ -852,57 +833,35 @@ class SwinTransformer(tf.keras.layers.Layer):
         """Apply the transformations of the transformer layer.
 
         Args:
-            inputs: Input embeddings with shape ``(batch_size, num_patches, embed_dim)``.
+            inputs: Input embeddings with shape
+            ``(batch_size, height_patches, width_patches, embed_dim)``.
+            ``height_patches`` must be equal to ``width_patches``.
 
         Returns:
             Transformed embeddings with same shape as ``inputs``.
         """
 
-        x = tf.ensure_shape(inputs, [None, self.resolution * self.resolution, None])
+        shortcut_1 = inputs
 
-        shape = tf.shape(inputs)
+        # Layer normalization
+        x = self.norm_1(inputs, **kwargs)
 
-        batch = shape[0]
-        channels = shape[2]
-
-        shortcut_1 = x
-
-        x = self.norm_1(x, **kwargs)
-        x = tf.reshape(x, [batch, self.resolution, self.resolution, channels])
-        shifted_x = x
-
+        # Cyclic shift
         if self.shift_size > 0:
-            shifted_x = tf.roll(
-                x, shift=[-self.shift_size, -self.shift_size], axis=[1, 2]
-            )
+            x = tf.roll(x, shift=[-self.shift_size, -self.shift_size], axis=[1, 2])
 
         # Window partitioning
-        x_windows = self.window_partition(shifted_x, self.window_size)
-        x_windows = tf.reshape(
-            x_windows, [-1, self.window_size * self.window_size, channels]
-        )
+        x = self.window_partition(x, self.window_size)
 
         # (Shifted) Window Multi-head Self Attention
-        attn_windows = self.attention(x_windows, mask=self.attn_mask, **kwargs)
+        x = self.attention(x, mask=self.attn_mask, **kwargs)
 
-        # Window merging
-        attn_windows = tf.reshape(
-            attn_windows, [-1, self.window_size, self.window_size, channels]
-        )
-        shifted_x = self.window_reverse(
-            attn_windows,
-            tf.constant(self.resolution),
-        )
+        # Undo window partitioning (window merging)
+        x = self.window_reverse(x, tf.constant(self.resolution))
 
-        # Reverse cyclic shift
+        # Undo cyclic shift (reverse cyclic shift)
         if self.shift_size > 0:
-            x = tf.roll(
-                shifted_x, shift=[self.shift_size, self.shift_size], axis=[1, 2]
-            )
-        else:
-            x = shifted_x
-
-        x = tf.reshape(x, [batch, self.resolution * self.resolution, channels])
+            x = tf.roll(x, shift=[self.shift_size, self.shift_size], axis=[1, 2])
 
         # Sum the skip connection and the output of (S)W-MSA
         x = shortcut_1 + self.drop_path(x, **kwargs)
@@ -921,7 +880,6 @@ class SwinTransformer(tf.keras.layers.Layer):
         config = super().get_config()
         config.update(
             {
-                "resolution": self.resolution,
                 "num_heads": self.num_heads,
                 "window_size": self.window_size,
                 "shift_size": self.shift_size,
@@ -933,4 +891,4 @@ class SwinTransformer(tf.keras.layers.Layer):
         return config
 
     def __repr__(self) -> str:
-        return f"{self.__class__.__name__}(resolution={self.resolution}, window_size={self.window_size}, shift_size={self.shift_size}, mlp_ratio={self.mlp_ratio}, drop_p={self.drop_p}, drop_path_p={self.drop_path_p})"
+        return f"{self.__class__.__name__}(window_size={self.window_size}, shift_size={self.shift_size}, mlp_ratio={self.mlp_ratio}, drop_p={self.drop_p}, drop_path_p={self.drop_path_p})"

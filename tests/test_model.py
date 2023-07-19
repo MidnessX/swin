@@ -1,9 +1,11 @@
 import pathlib
 import random
 import tempfile
-import tensorflow as tf
-import swin.model as sm
 import unittest
+
+import tensorflow as tf
+
+import swin.model as sm
 
 
 class TestSwin(unittest.TestCase):
@@ -34,6 +36,7 @@ class TestSwin(unittest.TestCase):
         self.embedding_to_head_ratio = 32
         self.embed_dim = self.num_heads[0] * self.embedding_to_head_ratio
         self.drop_rate = random.random()
+        self.drop_path_rate = random.random()
 
         self.input = tf.random.uniform(
             [self.batch_size, self.img_size, self.img_size, self.img_channels],
@@ -41,13 +44,13 @@ class TestSwin(unittest.TestCase):
         )
 
         self.model = sm.Swin(
-            self.input,
-            self.num_classes,
-            self.patch_size,
-            self.embed_dim,
-            self.depths,
-            self.num_heads,
-            self.drop_rate,
+            num_classes=self.num_classes,
+            patch_size=self.patch_size,
+            embed_dim=self.embed_dim,
+            depths=self.depths,
+            num_heads=self.num_heads,
+            drop_rate=self.drop_rate,
+            drop_path_rate=self.drop_path_rate,
         )
 
     def _build_dataset(self) -> tf.data.Dataset:
@@ -88,6 +91,44 @@ class TestSwin(unittest.TestCase):
         self.assertEqual(output.shape[0], self.batch_size)
         self.assertEqual(output.shape[1], self.num_classes)
 
+    def test_model_variants_output(self) -> None:
+        variants = [sm.SwinT, sm.SwinS, sm.SwinB, sm.SwinL]
+        image_size = 224
+
+        for variant in variants:
+            with self.subTest(f"Variant {variant}"):
+                model = variant(num_classes=self.num_classes, drop_rate=self.drop_rate)
+                inputs = tf.random.uniform([self.batch_size, image_size, image_size, 3])
+                output = model(inputs)
+
+                self.assertEqual(output.shape[0], self.batch_size)
+                self.assertEqual(output.shape[1], self.num_classes)
+
+    def test_model_custom_window_size_output(self) -> None:
+        depths = [2, 4, 2]
+        num_heads = [4, 8, 16]
+        patch_size = 6
+        window_size = 8
+        embed_dim = num_heads[0] * 32
+        img_size = 384
+        num_classes = random.randint(1, 10)
+        batch_size = 2 ** random.randint(1, 3)
+
+        inputs = tf.random.uniform([batch_size, img_size, img_size, 3])
+        model = sm.Swin(
+            num_classes=num_classes,
+            patch_size=patch_size,
+            window_size=window_size,
+            embed_dim=embed_dim,
+            depths=depths,
+            num_heads=num_heads,
+        )
+
+        output = model(inputs)
+
+        self.assertEqual(output.shape[0], batch_size)
+        self.assertEqual(output.shape[1], num_classes)
+
     def test_model_compile(self) -> None:
         self.model(self.input)
 
@@ -121,11 +162,12 @@ class TestSwin(unittest.TestCase):
 
         output_2 = self.model(self.input)
 
-        diff = tf.abs(output_1 - output_2)
-        diff = diff * 0.01  # We tolerate a 1% difference
-        diff = tf.floor(diff)
-        diff = tf.cast(diff, tf.bool)
-        self.assertEqual(tf.reduce_any(diff), False)
+        self.assertEqual(
+            tf.reduce_all(
+                tf.raw_ops.ApproximateEqual(x=output_1, y=output_2, tolerance=1e-2)
+            ),
+            True,
+        )  # We tolerate a 1% difference
 
     def test_model_restore_config(self) -> None:
         output_1 = self.model(self.input)
