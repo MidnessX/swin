@@ -15,7 +15,6 @@ import collections.abc
 
 import numpy as np
 import tensorflow as tf
-import tensorflow_addons as tfa
 
 from swin.modules import SwinLinear, SwinPatchEmbeddings, SwinStage
 
@@ -128,10 +127,6 @@ class Swin(tf.keras.Model):
         self.norm = tf.keras.layers.LayerNormalization(
             epsilon=1e-5, name="layer_normalization"
         )
-        self.avgpool = tfa.layers.AdaptiveAveragePooling2D(
-            [1, 1], name="adaptive_average_pooling"
-        )
-        self.flatten = tf.keras.layers.Flatten(name="flatten")
         self.head = SwinLinear(num_classes, name="classification_head")
 
     def build(self, input_shape: tf.TensorShape) -> None:
@@ -144,8 +139,9 @@ class Swin(tf.keras.Model):
         x = self.blocks(x, **kwargs)
 
         x = self.norm(x, **kwargs)
-        x = self.avgpool(x, **kwargs)
-        x = self.flatten(x, **kwargs)
+        # We average along height and width, while simultaneously flattening
+        # the result into (batch_size, embed_dim)
+        x = tf.reduce_mean(x, [1, 2], name="average_pooling_and_flattening")
         x = self.head(x, **kwargs)
         x = tf.nn.softmax(x)
 
