@@ -7,6 +7,10 @@ import tensorflow as tf
 
 import swin.model as sm
 
+MODEL_VARIANTS = [sm.SwinT, sm.SwinS, sm.SwinB, sm.SwinL]
+KERAS_MODEL_FORMATS = ["tf", "keras_v3"]
+RESTORED_MODEL_TOLERANCE = 1e-2  # A 1% difference between the original model's output and its restored-from-disk counterpart is tolerated
+
 
 class TestSwin(unittest.TestCase):
     def setUp(self) -> None:
@@ -85,6 +89,23 @@ class TestSwin(unittest.TestCase):
 
         model.compile(optimizer, loss, metrics)
 
+    def _restored_model_output(
+        self, model: tf.keras.Model, inputs: tf.Tensor, fmt: str
+    ):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            model_path = pathlib.Path(tmp_dir)
+
+            if fmt.startswith("keras"):
+                model_path = (
+                    model_path / "model.keras"
+                )  # The keras format requires a path to a .keras file
+
+            model.save(model_path, save_format=fmt)
+
+            model = tf.keras.models.load_model(model_path)
+
+        return model(inputs)
+
     def test_model_output(self) -> None:
         output = self.model(self.input)
 
@@ -92,10 +113,9 @@ class TestSwin(unittest.TestCase):
         self.assertEqual(output.shape[1], self.num_classes)
 
     def test_model_variants_output(self) -> None:
-        variants = [sm.SwinT, sm.SwinS, sm.SwinB, sm.SwinL]
         image_size = 224
 
-        for variant in variants:
+        for variant in MODEL_VARIANTS:
             with self.subTest(f"Variant {variant}"):
                 model = variant(num_classes=self.num_classes, drop_rate=self.drop_rate)
                 inputs = tf.random.uniform([self.batch_size, image_size, image_size, 3])
@@ -103,6 +123,28 @@ class TestSwin(unittest.TestCase):
 
                 self.assertEqual(output.shape[0], self.batch_size)
                 self.assertEqual(output.shape[1], self.num_classes)
+
+    def test_model_variants_restore(self) -> None:
+        variant = sm.SwinT  # Use SwinT as it's faster. Other variants are identical.
+
+        model = variant(self.num_classes)
+        x = tf.random.uniform([1, 224, 224, 3])
+
+        output_1 = model(x)
+
+        self._compile_model(model)
+
+        for fmt in KERAS_MODEL_FORMATS:
+            with self.subTest(f"{variant.__name__} model, {fmt} format"):
+                output_2 = self._restored_model_output(model=model, inputs=x, fmt=fmt)
+                self.assertEqual(
+                    tf.reduce_all(
+                        tf.raw_ops.ApproximateEqual(
+                            x=output_1, y=output_2, tolerance=RESTORED_MODEL_TOLERANCE
+                        )
+                    ),
+                    True,
+                )
 
     def test_model_custom_window_size_output(self) -> None:
         depths = [2, 4, 2]
@@ -154,20 +196,20 @@ class TestSwin(unittest.TestCase):
 
         self._compile_model(self.model)
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            tmp_model = pathlib.Path(tmp_dir) / "model"
-            self.model.save(tmp_model.as_posix())
+        for fmt in KERAS_MODEL_FORMATS:
+            with self.subTest(f"{fmt} format"):
+                output_2 = self._restored_model_output(
+                    model=self.model, inputs=self.input, fmt=fmt
+                )
 
-            self.model = tf.keras.models.load_model(tmp_model.as_posix())
-
-        output_2 = self.model(self.input)
-
-        self.assertEqual(
-            tf.reduce_all(
-                tf.raw_ops.ApproximateEqual(x=output_1, y=output_2, tolerance=1e-2)
-            ),
-            True,
-        )  # We tolerate a 1% difference
+                self.assertEqual(
+                    tf.reduce_all(
+                        tf.raw_ops.ApproximateEqual(
+                            x=output_1, y=output_2, tolerance=RESTORED_MODEL_TOLERANCE
+                        )
+                    ),
+                    True,
+                )
 
     def test_model_restore_config(self) -> None:
         output_1 = self.model(self.input)

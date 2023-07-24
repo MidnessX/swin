@@ -22,6 +22,7 @@ DEFAULT_DROP_RATE: float = 0.0
 DEFAULT_DROP_PATH_RATE: float = 0.1
 
 
+@tf.keras.saving.register_keras_serializable(package=__package__)
 class Swin(tf.keras.Model):
     """Swin Transformer Model.
 
@@ -129,9 +130,17 @@ class Swin(tf.keras.Model):
         )
         self.head = SwinLinear(num_classes, name="classification_head")
 
-    def build(self, input_shape: tf.TensorShape) -> None:
-        assert input_shape.rank == 4
+    def build(self, input_shape: tf.TensorShape | list) -> None:
+        assert len(input_shape) == 4
         assert input_shape[1] == input_shape[2] and input_shape[3] == 3
+
+        # Not mentioned anywhere in the docs, but the reference implementation
+        # of build() for the Model class recursively builds all sub-layers and
+        # sets the built attribute to True, so it must be called in order to
+        # truly build the model. Failure to do so results in a broken model
+        # when loading it back from disk, as layers will miss weights defined
+        # in their build() methods.
+        super().build(input_shape)
 
     def call(self, inputs, **kwargs):
         x = self.patch_embed(inputs, **kwargs)
@@ -148,23 +157,27 @@ class Swin(tf.keras.Model):
         return x
 
     def get_config(self) -> dict:
-        config = {
-            "num_classes": self.num_classes,
-            "patch_size": self.patch_size,
-            "window_size": self.window_size,
-            "embed_dim": self.embed_dim,
-            "depths": self.depths,
-            "num_heads": self.num_heads,
-            "drop_rate": self.drop_rate,
-            "drop_path_rate": self.drop_path_rate,
-        }
+        config = super().get_config().copy()
+        config.update(
+            {
+                "num_classes": self.num_classes,
+                "patch_size": self.patch_size,
+                "window_size": self.window_size,
+                "embed_dim": self.embed_dim,
+                "depths": self.depths,
+                "num_heads": self.num_heads,
+                "drop_rate": self.drop_rate,
+                "drop_path_rate": self.drop_path_rate,
+            }
+        )
 
         return config
 
     def __repr__(self) -> str:
-        return f"{self.__class__.__name__}(num_classes={self.num_classes}, patch_size={self.patch_size}, window_size={self.window_size}, embed_dim={self.embed_dim}, depths={self.depths}, num_heads={self.num_heads}, drop_rate={self.drop_rate}, drop_path_rate={self.drop_path_rate})"
+        return f"{Swin.__name__}(num_classes={self.num_classes}, patch_size={self.patch_size}, window_size={self.window_size}, embed_dim={self.embed_dim}, depths={self.depths}, num_heads={self.num_heads}, drop_rate={self.drop_rate}, drop_path_rate={self.drop_path_rate})"
 
 
+@tf.keras.saving.register_keras_serializable(package=__package__)
 class SwinT(Swin):
     """Swin-T Transformer Model.
 
@@ -221,7 +234,24 @@ class SwinT(Swin):
             **kwargs,
         )
 
+    def get_config(self) -> dict:
+        config = super().get_config().copy()
+        config.update(
+            {
+                "num_classes": self.num_classes,
+                "drop_rate": self.drop_rate,
+                "drop_path_rate": self.drop_path_rate,
+            }
+        )
 
+        return config
+
+    @classmethod
+    def from_config(cls, config: dict) -> "SwinT":
+        return Swin(**config)
+
+
+@tf.keras.saving.register_keras_serializable(package=__package__)
 class SwinS(Swin):
     """Swin-S Transformer Model.
 
@@ -278,7 +308,24 @@ class SwinS(Swin):
             **kwargs,
         )
 
+    def get_config(self) -> dict:
+        config = super().get_config().copy()
+        config.update(
+            {
+                "num_classes": self.num_classes,
+                "drop_rate": self.drop_rate,
+                "drop_path_rate": self.drop_path_rate,
+            }
+        )
 
+        return config
+
+    @classmethod
+    def from_config(cls, config: dict) -> "SwinT":
+        return Swin(**config)
+
+
+@tf.keras.saving.register_keras_serializable(package=__package__)
 class SwinB(Swin):
     """Swin-B Transformer Model.
 
@@ -335,7 +382,24 @@ class SwinB(Swin):
             **kwargs,
         )
 
+    def get_config(self) -> dict:
+        config = super().get_config().copy()
+        config.update(
+            {
+                "num_classes": self.num_classes,
+                "drop_rate": self.drop_rate,
+                "drop_path_rate": self.drop_path_rate,
+            }
+        )
 
+        return config
+
+    @classmethod
+    def from_config(cls, config: dict) -> "SwinT":
+        return Swin(**config)
+
+
+@tf.keras.saving.register_keras_serializable(package=__package__)
 class SwinL(Swin):
     """Swin-L Transformer Model.
 
@@ -391,3 +455,19 @@ class SwinL(Swin):
             drop_path_rate=drop_path_rate,
             **kwargs,
         )
+
+    def get_config(self) -> dict:
+        config = super().get_config().copy()
+        config.update(
+            {
+                "num_classes": self.num_classes,
+                "drop_rate": self.drop_rate,
+                "drop_path_rate": self.drop_path_rate,
+            }
+        )
+
+        return config
+
+    @classmethod
+    def from_config(cls, config: dict) -> "SwinT":
+        return Swin(**config)

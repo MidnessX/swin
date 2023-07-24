@@ -6,6 +6,7 @@ import numpy as np
 import tensorflow as tf
 
 
+@tf.keras.saving.register_keras_serializable(package=__package__)
 class SwinLinear(tf.keras.layers.Dense):
     """Linear layer.
 
@@ -32,6 +33,7 @@ class SwinLinear(tf.keras.layers.Dense):
         )
 
 
+@tf.keras.saving.register_keras_serializable(package=__package__)
 class SwinPatchEmbeddings(tf.keras.layers.Layer):
     """Patch embedding layer.
 
@@ -63,22 +65,16 @@ class SwinPatchEmbeddings(tf.keras.layers.Layer):
             else None
         )
 
-    def build(self, input_shape: tf.TensorShape) -> None:
+    def build(self, input_shape: tf.TensorShape | str) -> None:
         # We want a rank-4 tensor in the channels_last format.
         # The input image must be a square with a size divisibile by the
         # patch_size
         assert (
-            input_shape.rank == 4
+            len(input_shape) == 4
             and input_shape[3] == 3
             and input_shape[1] == input_shape[2]
             and input_shape[1] % self.patch_size == 0
         )
-
-        self.patches_resolution = (
-            input_shape[1] // self.patch_size,
-            input_shape[2] // self.patch_size,
-        )
-        self.num_patches = self.patches_resolution[0] * self.patches_resolution[1]
 
     def call(self, inputs: tf.Tensor, **kwargs) -> tf.Tensor:
         """Build embeddings for every patch of the image.
@@ -100,7 +96,7 @@ class SwinPatchEmbeddings(tf.keras.layers.Layer):
         return x
 
     def get_config(self) -> dict:
-        config = super().get_config()
+        config = super().get_config().copy()
         config.update(
             {
                 "embed_dim": self.embed_dim,
@@ -114,6 +110,7 @@ class SwinPatchEmbeddings(tf.keras.layers.Layer):
         return f"{self.__class__.__name__}(embed_dim={self.embed_dim}, patch_size={self.patch_size}, norm_layer={self.norm_layer})"
 
 
+@tf.keras.saving.register_keras_serializable(package=__package__)
 class SwinPatchMerging(tf.keras.layers.Layer):
     """Swin Patch Merging Layer.
 
@@ -127,8 +124,8 @@ class SwinPatchMerging(tf.keras.layers.Layer):
 
         self.norm = tf.keras.layers.LayerNormalization(epsilon=1e-5)
 
-    def build(self, input_shape: tf.TensorShape):
-        assert input_shape.rank == 4
+    def build(self, input_shape: tf.TensorShape | str):
+        assert len(input_shape) == 4
         assert input_shape[1] == input_shape[2]
         assert input_shape[1] % 2 == 0
 
@@ -172,6 +169,7 @@ class SwinPatchMerging(tf.keras.layers.Layer):
         return f"{self.__class__.__name__}()"
 
 
+@tf.keras.saving.register_keras_serializable(package=__package__)
 class SwinStage(tf.keras.layers.Layer):
     """Stage of the Swin Network.
 
@@ -229,9 +227,9 @@ class SwinStage(tf.keras.layers.Layer):
 
         self.downsample_layer = SwinPatchMerging() if downsample else None
 
-    def build(self, input_shape: tf.TensorShape):
+    def build(self, input_shape: tf.TensorShape | str):
         assert (
-            input_shape.rank == 4
+            len(input_shape) == 4
         )  # Must be batch_size, height_patches, width_patches, embed_dim
         assert input_shape[1] == input_shape[2]
 
@@ -258,7 +256,7 @@ class SwinStage(tf.keras.layers.Layer):
         return x
 
     def get_config(self) -> dict:
-        config = super().get_config()
+        config = super().get_config().copy()
         config.update(
             {
                 "depth": self.depth,
@@ -276,6 +274,7 @@ class SwinStage(tf.keras.layers.Layer):
         return f"{self.__class__.__name__}(depth={self.depth}, num_heads={self.num_heads}, window_size={self.window_size}, mlp_ratio={self.mlp_ratio}, drop_p={self.drop_p}, drop_path_p={self.drop_path_p}, downsample={self.downsample})"
 
 
+@tf.keras.saving.register_keras_serializable(package=__package__)
 class SwinWindowAttention(tf.keras.layers.Layer):
     """Swin (Shifted) Window Multi-head Self Attention Layer.
 
@@ -341,14 +340,14 @@ class SwinWindowAttention(tf.keras.layers.Layer):
 
         return rel_pos_index
 
-    def build(self, input_shape: tf.TensorShape) -> None:
-        assert input_shape.rank == 5
+    def build(self, input_shape: tf.TensorShape | str) -> None:
+        assert len(input_shape) == 5
         assert input_shape[2] == input_shape[3]
         assert (
             input_shape[4] % self.num_heads == 0
         )  # embeddings dimension must be evenly divisible by the number of attention heads
 
-        self.window_size = input_shape[2]
+        window_size = input_shape[2]
         embed_dim = input_shape[4]
 
         self.head_dim = embed_dim // self.num_heads
@@ -360,7 +359,7 @@ class SwinWindowAttention(tf.keras.layers.Layer):
         # interval [-stddev, +stddev]
         self.relative_position_bias_table = self.add_weight(
             shape=[
-                (2 * self.window_size - 1) ** 2,
+                (2 * window_size - 1) ** 2,
                 self.num_heads,
             ],
             dtype=tf.float32,
@@ -369,14 +368,12 @@ class SwinWindowAttention(tf.keras.layers.Layer):
             trainable=True,
         )
 
-        self.relative_position_index = tf.Variable(
-            initial_value=tf.reshape(
-                SwinWindowAttention.build_relative_position_index(self.window_size),
+        self.relative_position_index = (
+            tf.reshape(
+                SwinWindowAttention.build_relative_position_index(window_size),
                 [-1],
-            ),  # Flatten the matrix so it can be used to index the relative_position_bias_table in the forward pass
-            trainable=False,
-            name="relative_position_index",
-        )
+            ),
+        )  # Flatten the matrix so it can be used to index the relative_position_bias_table in the forward pass
 
         self.qkv = SwinLinear(embed_dim * 3)
         self.proj = SwinLinear(embed_dim)
@@ -469,7 +466,7 @@ class SwinWindowAttention(tf.keras.layers.Layer):
         return attn
 
     def get_config(self) -> dict:
-        config = super().get_config()
+        config = super().get_config().copy()
         config.update(
             {
                 "num_heads": self.num_heads,
@@ -482,6 +479,7 @@ class SwinWindowAttention(tf.keras.layers.Layer):
         return f"{self.__class__.__name__}(num_heads={self.num_heads}, proj_drop_r={self.proj_drop_r})"
 
 
+@tf.keras.saving.register_keras_serializable(package=__package__)
 class SwinDropPath(tf.keras.layers.Layer):
     """Stochastic per-sample layer drop.
 
@@ -506,11 +504,11 @@ class SwinDropPath(tf.keras.layers.Layer):
         self.drop_prob = drop_prob
         self.keep_prob = 1 - self.drop_prob
 
-    def build(self, input_shape: tf.TensorShape) -> None:
+    def build(self, input_shape: tf.TensorShape | str) -> None:
         # We want to get a rank-1 tensor, with tf.rank(inputs) values all set to
         # 1 except for the first one, identical to the batch size.
         # e.g. [4, 1, 1, 1].
-        self.shape = tf.ones([input_shape.rank], dtype=tf.int32)
+        self.shape = tf.ones([len(input_shape)], dtype=tf.int32)
         self.shape = tf.tensor_scatter_nd_update(self.shape, [[0]], [input_shape[0]])
 
     def call(
@@ -543,7 +541,7 @@ class SwinDropPath(tf.keras.layers.Layer):
         return output
 
     def get_config(self) -> dict:
-        config = super().get_config()
+        config = super().get_config().copy()
         config.update({"drop_prob": self.drop_prob})
         return config
 
@@ -551,6 +549,7 @@ class SwinDropPath(tf.keras.layers.Layer):
         return f"{self.__class__.__name__}(drop_prob={self.drop_prob})"
 
 
+@tf.keras.saving.register_keras_serializable(package=__package__)
 class SwinMlp(tf.keras.layers.Layer):
     """Swin Multi-layer Perceptron Layer.
 
@@ -573,8 +572,8 @@ class SwinMlp(tf.keras.layers.Layer):
         self.fc2 = SwinLinear(self.out_features)
         self.drop = tf.keras.layers.Dropout(self.drop_p)
 
-    def build(self, input_shape: tf.TensorShape) -> None:
-        assert input_shape.rank == 4
+    def build(self, input_shape: tf.TensorShape | str) -> None:
+        assert len(input_shape) == 4
 
     def call(self, inputs: tf.Tensor, **kwargs) -> tf.Tensor:
         """Apply the transformations of the MLP.
@@ -597,7 +596,7 @@ class SwinMlp(tf.keras.layers.Layer):
         return x
 
     def get_config(self) -> dict:
-        config = super().get_config()
+        config = super().get_config().copy()
         config.update(
             {
                 "hidden_features": self.hidden_features,
@@ -611,6 +610,7 @@ class SwinMlp(tf.keras.layers.Layer):
         return f"{self.__class__.__name__}(hidden_features={self.hidden_features}, out_features={self.out_features}, drop_p={self.drop_p})"
 
 
+@tf.keras.saving.register_keras_serializable(package=__package__)
 class SwinTransformer(tf.keras.layers.Layer):
     """Swin Transformer Layer.
 
@@ -794,8 +794,8 @@ class SwinTransformer(tf.keras.layers.Layer):
 
         return attn_mask
 
-    def build(self, input_shape: tf.TensorShape) -> None:
-        assert input_shape.rank == 4
+    def build(self, input_shape: tf.TensorShape | str) -> None:
+        assert len(input_shape) == 4
         assert input_shape[1] == input_shape[2]
 
         self.resolution = input_shape[1]
@@ -811,16 +811,10 @@ class SwinTransformer(tf.keras.layers.Layer):
         assert 0 <= self.shift_size < self.window_size
 
         if self.shift_size > 0:
-            attn_mask = self.build_attn_mask(
+            self.attn_mask = self.build_attn_mask(
                 self.resolution,
                 self.window_size,
                 self.shift_size,
-            )
-
-            self.attn_mask = tf.Variable(
-                initial_value=attn_mask,
-                trainable=False,
-                name="attention_mask",
             )
         else:
             self.attn_mask = None
@@ -877,7 +871,7 @@ class SwinTransformer(tf.keras.layers.Layer):
         return x
 
     def get_config(self) -> dict:
-        config = super().get_config()
+        config = super().get_config().copy()
         config.update(
             {
                 "num_heads": self.num_heads,
