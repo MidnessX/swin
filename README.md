@@ -20,7 +20,7 @@ cd swin
 ```
 Install the package via:
 ```bash
-pip install swin-transformer
+pip install .
 ```
 
 ## Usage
